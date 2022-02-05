@@ -12,18 +12,13 @@
 //!
 //! [ref]: https://developer.apple.com/library/mac/documentation/Darwin/Reference/FSEvents_Ref/
 
-#![allow(non_upper_case_globals, dead_code)]
+#![allow(non_upper_case_globals)]
 
-use crate::event::*;
-use crate::{Config, Error,  RecursiveMode, Result, Watcher};
-use crossbeam_channel::{unbounded, Sender};
 use fsevent_sys as fs;
 use fsevent_sys::core_foundation as cf;
-use std::collections::HashMap;
 use std::ffi::CStr;
 use std::path::{Path, PathBuf};
 use std::ptr;
-use std::thread;
 
 bitflags::bitflags! {
   #[repr(C)]
@@ -61,8 +56,6 @@ pub struct FsEventWatcher {
     since_when: fs::FSEventStreamEventId,
     latency: cf::CFTimeInterval,
     flags: fs::FSEventStreamCreateFlags,
-    runloop: Option<(cf::CFRunLoopRef, thread::JoinHandle<()>)>,
-    recursive_info: HashMap<PathBuf, bool>,
 }
 
 // CFMutableArrayRef is a type alias to *mut libc::c_void, so FsEventWatcher is not Send/Sync
@@ -72,156 +65,7 @@ unsafe impl Send for FsEventWatcher {}
 // It's Sync because all methods that change the mutable state use `&mut self`.
 unsafe impl Sync for FsEventWatcher {}
 
-fn translate_flags(flags: StreamFlags, precise: bool) -> Vec<Event> {
-    let mut evs = Vec::new();
-
-    // «Denotes a sentinel event sent to mark the end of the "historical" events
-    // sent as a result of specifying a `sinceWhen` value in the FSEvents.Create
-    // call that created this event stream. After invoking the client's callback
-    // with all the "historical" events that occurred before now, the client's
-    // callback will be invoked with an event where the HistoryDone flag is set.
-    // The client should ignore the path supplied in this callback.»
-    // — https://www.mbsplugins.eu/FSEventsNextEvent.shtml
-    //
-    // As a result, we just stop processing here and return an empty vec, which
-    // will ignore this completely and not emit any Events whatsoever.
-    if flags.contains(StreamFlags::HISTORY_DONE) {
-        return evs;
-    }
-
-    // FSEvents provides two possible hints as to why events were dropped,
-    // however documentation on what those mean is scant, so we just pass them
-    // through in the info attr field. The intent is clear enough, and the
-    // additional information is provided if the user wants it.
-    if flags.contains(StreamFlags::MUST_SCAN_SUBDIRS) {
-        let e = Event::new(EventKind::Other).set_flag(Flag::Rescan);
-        evs.push(if flags.contains(StreamFlags::USER_DROPPED) {
-            e.set_info("rescan: user dropped")
-        } else if flags.contains(StreamFlags::KERNEL_DROPPED) {
-            e.set_info("rescan: kernel dropped")
-        } else {
-            e
-        });
-    }
-
-    // In imprecise mode, let's not even bother parsing the kind of the event
-    // except for the above very special events.
-    if !precise {
-        evs.push(Event::new(EventKind::Any));
-        return evs;
-    }
-
-    // This is most likely a rename or a removal. We assume rename but may want
-    // to figure out if it was a removal some way later (TODO). To denote the
-    // special nature of the event, we add an info string.
-    if flags.contains(StreamFlags::ROOT_CHANGED) {
-        evs.push(
-            Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::From)))
-                .set_info("root changed"),
-        );
-    }
-
-    // A path was mounted at the event path; we treat that as a create.
-    if flags.contains(StreamFlags::MOUNT) {
-        evs.push(Event::new(EventKind::Create(CreateKind::Other)).set_info("mount"));
-    }
-
-    // A path was unmounted at the event path; we treat that as a remove.
-    if flags.contains(StreamFlags::UNMOUNT) {
-        evs.push(Event::new(EventKind::Remove(RemoveKind::Other)).set_info("mount"));
-    }
-
-    if flags.contains(StreamFlags::ITEM_CREATED) {
-        evs.push(if flags.contains(StreamFlags::IS_DIR) {
-            Event::new(EventKind::Create(CreateKind::Folder))
-        } else if flags.contains(StreamFlags::IS_FILE) {
-            Event::new(EventKind::Create(CreateKind::File))
-        } else {
-            let e = Event::new(EventKind::Create(CreateKind::Other));
-            if flags.contains(StreamFlags::IS_SYMLINK) {
-                e.set_info("is: symlink")
-            } else if flags.contains(StreamFlags::IS_HARDLINK) {
-                e.set_info("is: hardlink")
-            } else if flags.contains(StreamFlags::ITEM_CLONED) {
-                e.set_info("is: clone")
-            } else {
-                Event::new(EventKind::Create(CreateKind::Any))
-            }
-        });
-    }
-
-    if flags.contains(StreamFlags::ITEM_REMOVED) {
-        evs.push(if flags.contains(StreamFlags::IS_DIR) {
-            Event::new(EventKind::Remove(RemoveKind::Folder))
-        } else if flags.contains(StreamFlags::IS_FILE) {
-            Event::new(EventKind::Remove(RemoveKind::File))
-        } else {
-            let e = Event::new(EventKind::Remove(RemoveKind::Other));
-            if flags.contains(StreamFlags::IS_SYMLINK) {
-                e.set_info("is: symlink")
-            } else if flags.contains(StreamFlags::IS_HARDLINK) {
-                e.set_info("is: hardlink")
-            } else if flags.contains(StreamFlags::ITEM_CLONED) {
-                e.set_info("is: clone")
-            } else {
-                Event::new(EventKind::Remove(RemoveKind::Any))
-            }
-        });
-    }
-
-    if flags.contains(StreamFlags::ITEM_RENAMED) {
-        evs.push(Event::new(EventKind::Modify(ModifyKind::Name(
-            RenameMode::From,
-        ))));
-    }
-
-    // This is only described as "metadata changed", but it may be that it's
-    // only emitted for some more precise subset of events... if so, will need
-    // amending, but for now we have an Any-shaped bucket to put it in.
-    if flags.contains(StreamFlags::INODE_META_MOD) {
-        evs.push(Event::new(EventKind::Modify(ModifyKind::Metadata(
-            MetadataKind::Any,
-        ))));
-    }
-
-    if flags.contains(StreamFlags::FINDER_INFO_MOD) {
-        evs.push(
-            Event::new(EventKind::Modify(ModifyKind::Metadata(MetadataKind::Other)))
-                .set_info("meta: finder info"),
-        );
-    }
-
-    if flags.contains(StreamFlags::ITEM_CHANGE_OWNER) {
-        evs.push(Event::new(EventKind::Modify(ModifyKind::Metadata(
-            MetadataKind::Ownership,
-        ))));
-    }
-
-    if flags.contains(StreamFlags::ITEM_XATTR_MOD) {
-        evs.push(Event::new(EventKind::Modify(ModifyKind::Metadata(
-            MetadataKind::Extended,
-        ))));
-    }
-
-    // This is specifically described as a data change, which we take to mean
-    // is a content change.
-    if flags.contains(StreamFlags::ITEM_MODIFIED) {
-        evs.push(Event::new(EventKind::Modify(ModifyKind::Data(
-            DataChange::Content,
-        ))));
-    }
-
-    if flags.contains(StreamFlags::OWN_EVENT) {
-        for ev in &mut evs {
-            *ev = std::mem::take(ev).set_process_id(std::process::id());
-        }
-    }
-
-    evs
-}
-
 struct StreamContextInfo {
-    recursive_info: HashMap<PathBuf, bool>,
 }
 
 // Free the context when the stream created by `FSEventStreamCreate` is released.
@@ -239,11 +83,6 @@ extern "C" fn release_context(info: *const libc::c_void) {
     }
 }
 
-extern "C" {
-    /// Indicates whether the run loop is waiting for an event.
-    fn CFRunLoopIsWaiting(runloop: cf::CFRunLoopRef) -> cf::Boolean;
-}
-
 impl FsEventWatcher {
     pub fn new() -> FsEventWatcher {
         FsEventWatcher {
@@ -253,22 +92,17 @@ impl FsEventWatcher {
             since_when: fs::kFSEventStreamEventIdSinceNow,
             latency: 0.0,
             flags: fs::kFSEventStreamCreateFlagFileEvents | fs::kFSEventStreamCreateFlagNoDefer,
-            runloop: None,
-            recursive_info: HashMap::new(),
         }
     }
 
-    fn watch_inner(&mut self, path: &Path, recursive_mode: RecursiveMode) {
-        self.append_path(path, recursive_mode).unwrap();
-        // ignore return error: may be empty path list
+    pub fn watch(&mut self, path: &Path) {
+        self.append_path(path);
         self.run();
     }
 
     // https://github.com/thibaudgg/rb-fsevent/blob/master/ext/fsevent_watch/main.c
-    fn append_path(&mut self, path: &Path, recursive_mode: RecursiveMode) -> Result<()> {
-        if !path.exists() {
-            return Err(Error::path_not_found().add_path(path.into()));
-        }
+    fn append_path(&mut self, path: &Path) {
+        assert!(path.exists());
         let str_path = path.to_str().unwrap();
         unsafe {
             let mut err: cf::CFErrorRef = ptr::null_mut();
@@ -277,16 +111,11 @@ impl FsEventWatcher {
                 // Most likely the directory was deleted, or permissions changed,
                 // while the above code was running.
                 cf::CFRelease(err as cf::CFRef);
-                return Err(Error::path_not_found().add_path(path.into()));
+                panic!("path not found");
             }
             cf::CFArrayAppendValue(self.paths, cf_path);
             cf::CFRelease(cf_path);
         }
-        self.recursive_info.insert(
-            path.to_path_buf().canonicalize().unwrap(),
-            recursive_mode.is_recursive(),
-        );
-        Ok(())
     }
 
     fn run(&mut self) {
@@ -299,7 +128,6 @@ impl FsEventWatcher {
         // stream is closed. This means we will leak the context if we panic before reacing
         // `FSEventStreamRelease`.
         let context = Box::into_raw(Box::new(StreamContextInfo {
-            recursive_info: self.recursive_info.clone(),
         }));
 
         let stream_context = fs::FSEventStreamContext {
@@ -337,11 +165,6 @@ impl FsEventWatcher {
             fs::FSEventStreamRelease(stream);
         }
         panic!("no");
-    }
-
-    fn configure_raw_mode(&mut self, _config: Config, tx: Sender<Result<bool>>) {
-        tx.send(Ok(false))
-            .expect("configuration channel disconnect");
     }
 }
 
@@ -391,52 +214,4 @@ unsafe fn callback_impl(
 
         println!("raw event: {:?} {:?}", path, flag);
     }
-}
-
-impl Watcher for FsEventWatcher {
-    fn watch(&mut self, path: &Path, recursive_mode: RecursiveMode) {
-        self.watch_inner(path, recursive_mode)
-    }
-
-    fn configure(&mut self, config: Config) -> Result<bool> {
-        let (tx, rx) = unbounded();
-        self.configure_raw_mode(config, tx);
-        rx.recv()?
-    }
-}
-
-#[test]
-fn test_fsevent_watcher_drop() {
-    use super::*;
-    use std::time::Duration;
-
-    let dir = tempfile::tempdir().unwrap();
-
-    let (tx, rx) = std::sync::mpsc::channel();
-
-    {
-        let mut watcher = FsEventWatcher::new(tx).unwrap();
-        watcher.watch(dir.path(), RecursiveMode::Recursive).unwrap();
-        thread::sleep(Duration::from_millis(2000));
-        println!("is running -> {}", watcher.is_running());
-
-        thread::sleep(Duration::from_millis(1000));
-        watcher.unwatch(dir.path()).unwrap();
-        println!("is running -> {}", watcher.is_running());
-    }
-
-    thread::sleep(Duration::from_millis(1000));
-
-    for res in rx {
-        let e = res.unwrap();
-        println!("debug => {:?} {:?}", e.kind, e.paths);
-    }
-
-    println!("in test: {} works", file!());
-}
-
-#[test]
-fn test_steam_context_info_send_and_sync() {
-    fn check_send<T: Send + Sync>() {}
-    check_send::<StreamContextInfo>();
 }
