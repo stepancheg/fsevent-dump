@@ -285,10 +285,6 @@ impl Watcher for PollWatcher {
     fn watch(&mut self, path: &Path, recursive_mode: RecursiveMode) -> Result<()> {
         self.watch_inner(path, recursive_mode)
     }
-
-    fn unwatch(&mut self, path: &Path) -> Result<()> {
-        self.unwatch_inner(path)
-    }
 }
 
 impl Drop for PollWatcher {

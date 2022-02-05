@@ -264,82 +264,10 @@ impl FsEventWatcher {
     }
 
     fn watch_inner(&mut self, path: &Path, recursive_mode: RecursiveMode) -> Result<()> {
-        self.stop();
         let result = self.append_path(path, recursive_mode);
         // ignore return error: may be empty path list
         let _ = self.run();
         result
-    }
-
-    fn unwatch_inner(&mut self, path: &Path) -> Result<()> {
-        self.stop();
-        let result = self.remove_path(path);
-        // ignore return error: may be empty path list
-        let _ = self.run();
-        result
-    }
-
-    #[inline]
-    fn is_running(&self) -> bool {
-        self.runloop.is_some()
-    }
-
-    fn stop(&mut self) {
-        if !self.is_running() {
-            return;
-        }
-
-        if let Some((runloop, thread_handle)) = self.runloop.take() {
-            unsafe {
-                let runloop = runloop as *mut raw::c_void;
-
-                while CFRunLoopIsWaiting(runloop) == 0 {
-                    thread::yield_now();
-                }
-
-                cf::CFRunLoopStop(runloop);
-            }
-
-            // Wait for the thread to shut down.
-            thread_handle.join().expect("thread to shut down");
-        }
-    }
-
-    fn remove_path(&mut self, path: &Path) -> Result<()> {
-        let str_path = path.to_str().unwrap();
-        unsafe {
-            let mut err: cf::CFErrorRef = ptr::null_mut();
-            let cf_path = cf::str_path_to_cfstring_ref(str_path, &mut err);
-            if cf_path.is_null() {
-                cf::CFRelease(err as cf::CFRef);
-                return Err(Error::watch_not_found().add_path(path.into()));
-            }
-
-            let mut to_remove = Vec::new();
-            for idx in 0..cf::CFArrayGetCount(self.paths) {
-                let item = cf::CFArrayGetValueAtIndex(self.paths, idx);
-                if cf::CFStringCompare(item, cf_path, cf::kCFCompareCaseInsensitive)
-                    == cf::kCFCompareEqualTo
-                {
-                    to_remove.push(idx);
-                }
-            }
-
-            cf::CFRelease(cf_path);
-
-            for idx in to_remove.iter().rev() {
-                cf::CFArrayRemoveValueAtIndex(self.paths, *idx);
-            }
-        }
-        let p = if let Ok(canonicalized_path) = path.canonicalize() {
-            canonicalized_path
-        } else {
-            path.to_owned()
-        };
-        match self.recursive_info.remove(&p) {
-            Some(_) => Ok(()),
-            None => Err(Error::watch_not_found()),
-        }
     }
 
     // https://github.com/thibaudgg/rb-fsevent/blob/master/ext/fsevent_watch/main.c
@@ -402,49 +330,21 @@ impl FsEventWatcher {
             )
         };
 
-        // Wrapper to help send CFRef types across threads.
-        struct CFSendWrapper(cf::CFRef);
+        unsafe {
+            let cur_runloop = cf::CFRunLoopGetCurrent();
 
-        // Safety:
-        // - According to the Apple documentation, it's safe to move `CFRef`s across threads.
-        //   https://developer.apple.com/library/archive/documentation/Cocoa/Conceptual/Multithreading/ThreadSafetySummary/ThreadSafetySummary.html
-        unsafe impl Send for CFSendWrapper {}
-
-        // move into thread
-        let stream = CFSendWrapper(stream);
-
-        // channel to pass runloop around
-        let (rl_tx, rl_rx) = unbounded::<CFSendWrapper>();
-
-        let thread_handle = thread::spawn(move || {
-            let stream = stream;
-            let stream = stream.0;
-
-            unsafe {
-                let cur_runloop = cf::CFRunLoopGetCurrent();
-
-                fs::FSEventStreamScheduleWithRunLoop(
-                    stream,
-                    cur_runloop,
-                    cf::kCFRunLoopDefaultMode,
-                );
-                fs::FSEventStreamStart(stream);
-
-                // the calling to CFRunLoopRun will be terminated by CFRunLoopStop call in drop()
-                rl_tx
-                    .send(CFSendWrapper(cur_runloop))
-                    .expect("Unable to send runloop to watcher");
-
-                cf::CFRunLoopRun();
-                fs::FSEventStreamStop(stream);
-                fs::FSEventStreamInvalidate(stream);
-                fs::FSEventStreamRelease(stream);
-            }
-        });
-        // block until runloop has been sent
-        self.runloop = Some((rl_rx.recv().unwrap().0, thread_handle));
-
-        Ok(())
+            fs::FSEventStreamScheduleWithRunLoop(
+                stream,
+                cur_runloop,
+                cf::kCFRunLoopDefaultMode,
+            );
+            fs::FSEventStreamStart(stream);
+            cf::CFRunLoopRun();
+            fs::FSEventStreamStop(stream);
+            fs::FSEventStreamInvalidate(stream);
+            fs::FSEventStreamRelease(stream);
+        }
+        panic!("no");
     }
 
     fn configure_raw_mode(&mut self, _config: Config, tx: Sender<Result<bool>>) {
@@ -489,12 +389,17 @@ unsafe fn callback_impl(
         let path = CStr::from_ptr(*event_paths.add(p))
             .to_str()
             .expect("Invalid UTF8 string.");
+        if path.contains(".hg") {
+            continue;
+        }
         let path = PathBuf::from(path);
 
         let flag = *event_flags.add(p);
         let flag = StreamFlags::from_bits(flag).unwrap_or_else(|| {
             panic!("Unable to decode StreamFlags: {}", flag);
         });
+
+        println!("raw event: {:?} {:?}", path, flag);
 
         let mut handle_event = false;
         for (p, r) in &(*info).recursive_info {
@@ -534,23 +439,10 @@ impl Watcher for FsEventWatcher {
         self.watch_inner(path, recursive_mode)
     }
 
-    fn unwatch(&mut self, path: &Path) -> Result<()> {
-        self.unwatch_inner(path)
-    }
-
     fn configure(&mut self, config: Config) -> Result<bool> {
         let (tx, rx) = unbounded();
         self.configure_raw_mode(config, tx);
         rx.recv()?
-    }
-}
-
-impl Drop for FsEventWatcher {
-    fn drop(&mut self) {
-        self.stop();
-        unsafe {
-            cf::CFRelease(self.paths);
-        }
     }
 }
 
