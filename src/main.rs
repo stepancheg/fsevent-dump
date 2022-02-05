@@ -1,12 +1,12 @@
 use std::path::Path;
 use std::thread;
 use std::time::Duration;
-use listen_notify::{Watcher, RecommendedWatcher, RecursiveMode, Result, Event};
+use listen_notify::{Watcher, RecursiveMode, Result, Event};
 use listen_notify::event::Flag;
 
 fn main() -> listen_notify::Result<()> {
     // Automatically select the best implementation for your platform.
-    let mut watcher = listen_notify::recommended_watcher(|res: Result<Event>| {
+    let mut watcher = listen_notify::FsEventWatcher::new(|res: Result<Event>| {
         match res {
            Ok(event) => {
                if format!("{:?}", event).contains(".hg") {
@@ -29,6 +29,4 @@ fn main() -> listen_notify::Result<()> {
     loop {
         thread::sleep(Duration::from_secs(1));
     }
-    println!("done");
-    Ok(())
 }

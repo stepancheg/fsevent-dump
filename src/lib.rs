@@ -80,26 +80,8 @@ pub trait Watcher {
     }
 }
 
-/// The recommended `Watcher` implementation for the current platform
-#[cfg(target_os = "linux")]
-pub type RecommendedWatcher = INotifyWatcher;
-/// The recommended `Watcher` implementation for the current platform
-#[cfg(target_os = "macos")]
 pub type RecommendedWatcher = FsEventWatcher;
-/// The recommended `Watcher` implementation for the current platform
-#[cfg(target_os = "windows")]
-pub type RecommendedWatcher = ReadDirectoryChangesWatcher;
-/// The recommended `Watcher` implementation for the current platform
-#[cfg(target_os = "freebsd")]
-pub type RecommendedWatcher = KqueueWatcher;
-/// The recommended `Watcher` implementation for the current platform
-#[cfg(not(any(
-    target_os = "linux",
-    target_os = "macos",
-    target_os = "windows",
-    target_os = "freebsd"
-)))]
-pub type RecommendedWatcher = PollWatcher;
+
 
 /// Convenience method for creating the `RecommendedWatcher` for the current platform in
 /// _immediate_ mode.
@@ -111,14 +93,4 @@ where
 {
     // All recommended watchers currently implement `new`, so just call that.
     RecommendedWatcher::new(event_handler)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_object_safe() {
-        let _watcher: &dyn Watcher = &NullWatcher;
-    }
 }

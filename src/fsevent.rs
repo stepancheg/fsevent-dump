@@ -21,7 +21,6 @@ use fsevent_sys as fs;
 use fsevent_sys::core_foundation as cf;
 use std::collections::HashMap;
 use std::ffi::CStr;
-use std::os::raw;
 use std::path::{Path, PathBuf};
 use std::ptr;
 use std::sync::{Arc, Mutex};
@@ -63,7 +62,6 @@ pub struct FsEventWatcher {
     since_when: fs::FSEventStreamEventId,
     latency: cf::CFTimeInterval,
     flags: fs::FSEventStreamCreateFlags,
-    event_handler: Arc<Mutex<dyn EventHandler>>,
     runloop: Option<(cf::CFRunLoopRef, thread::JoinHandle<()>)>,
     recursive_info: HashMap<PathBuf, bool>,
 }
@@ -224,7 +222,6 @@ fn translate_flags(flags: StreamFlags, precise: bool) -> Vec<Event> {
 }
 
 struct StreamContextInfo {
-    event_handler: Arc<Mutex<dyn EventHandler>>,
     recursive_info: HashMap<PathBuf, bool>,
 }
 
@@ -249,7 +246,7 @@ extern "C" {
 }
 
 impl FsEventWatcher {
-    fn from_event_handler(event_handler: Arc<Mutex<dyn EventHandler>>) -> Result<Self> {
+    fn from_event_handler() -> Result<Self> {
         Ok(FsEventWatcher {
             paths: unsafe {
                 cf::CFArrayCreateMutable(cf::kCFAllocatorDefault, 0, &cf::kCFTypeArrayCallBacks)
@@ -257,7 +254,6 @@ impl FsEventWatcher {
             since_when: fs::kFSEventStreamEventIdSinceNow,
             latency: 0.0,
             flags: fs::kFSEventStreamCreateFlagFileEvents | fs::kFSEventStreamCreateFlagNoDefer,
-            event_handler,
             runloop: None,
             recursive_info: HashMap::new(),
         })
@@ -306,7 +302,6 @@ impl FsEventWatcher {
         // stream is closed. This means we will leak the context if we panic before reacing
         // `FSEventStreamRelease`.
         let context = Box::into_raw(Box::new(StreamContextInfo {
-            event_handler: self.event_handler.clone(),
             recursive_info: self.recursive_info.clone(),
         }));
 
@@ -375,15 +370,13 @@ extern "C" fn callback(
 
 unsafe fn callback_impl(
     _stream_ref: fs::FSEventStreamRef,
-    info: *mut libc::c_void,
+    _info: *mut libc::c_void,
     num_events: libc::size_t,                        // size_t numEvents
     event_paths: *mut libc::c_void,                  // void *eventPaths
     event_flags: *const fs::FSEventStreamEventFlags, // const FSEventStreamEventFlags eventFlags[]
     _event_ids: *const fs::FSEventStreamEventId,     // const FSEventStreamEventId eventIds[]
 ) {
     let event_paths = event_paths as *const *const libc::c_char;
-    let info = info as *const StreamContextInfo;
-    let event_handler = &(*info).event_handler;
 
     for p in 0..num_events {
         let path = CStr::from_ptr(*event_paths.add(p))
@@ -400,39 +393,13 @@ unsafe fn callback_impl(
         });
 
         println!("raw event: {:?} {:?}", path, flag);
-
-        let mut handle_event = false;
-        for (p, r) in &(*info).recursive_info {
-            if path.starts_with(p) {
-                if *r || &path == p {
-                    handle_event = true;
-                    break;
-                } else if let Some(parent_path) = path.parent() {
-                    if parent_path == p {
-                        handle_event = true;
-                        break;
-                    }
-                }
-            }
-        }
-
-        if !handle_event {
-            continue;
-        }
-
-        for ev in translate_flags(flag, true).into_iter() {
-            // TODO: precise
-            let ev = ev.add_path(path.clone());
-            let mut event_handler = event_handler.lock().expect("lock not to be poisoned");
-            event_handler.handle_event(Ok(ev));
-        }
     }
 }
 
 impl Watcher for FsEventWatcher {
     /// Create a new watcher.
     fn new<F: EventHandler>(event_handler: F) -> Result<Self> {
-        Self::from_event_handler(Arc::new(Mutex::new(event_handler)))
+        Self::from_event_handler()
     }
 
     fn watch(&mut self, path: &Path, recursive_mode: RecursiveMode) -> Result<()> {

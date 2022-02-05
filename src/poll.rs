@@ -264,14 +264,6 @@ impl PollWatcher {
         }
         Ok(())
     }
-
-    fn unwatch_inner(&mut self, path: &Path) -> Result<()> {
-        if (*self.watches).lock().unwrap().remove(path).is_some() {
-            Ok(())
-        } else {
-            Err(Error::watch_not_found())
-        }
-    }
 }
 
 impl Watcher for PollWatcher {
