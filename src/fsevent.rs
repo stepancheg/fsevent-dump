@@ -15,7 +15,7 @@
 #![allow(non_upper_case_globals, dead_code)]
 
 use crate::event::*;
-use crate::{Config, Error, EventHandler, RecursiveMode, Result, Watcher};
+use crate::{Config, Error,  RecursiveMode, Result, Watcher};
 use crossbeam_channel::{unbounded, Sender};
 use fsevent_sys as fs;
 use fsevent_sys::core_foundation as cf;
@@ -23,7 +23,6 @@ use std::collections::HashMap;
 use std::ffi::CStr;
 use std::path::{Path, PathBuf};
 use std::ptr;
-use std::sync::{Arc, Mutex};
 use std::thread;
 
 bitflags::bitflags! {
@@ -246,8 +245,8 @@ extern "C" {
 }
 
 impl FsEventWatcher {
-    fn from_event_handler() -> Result<Self> {
-        Ok(FsEventWatcher {
+    pub fn new() -> FsEventWatcher {
+        FsEventWatcher {
             paths: unsafe {
                 cf::CFArrayCreateMutable(cf::kCFAllocatorDefault, 0, &cf::kCFTypeArrayCallBacks)
             },
@@ -256,14 +255,13 @@ impl FsEventWatcher {
             flags: fs::kFSEventStreamCreateFlagFileEvents | fs::kFSEventStreamCreateFlagNoDefer,
             runloop: None,
             recursive_info: HashMap::new(),
-        })
+        }
     }
 
-    fn watch_inner(&mut self, path: &Path, recursive_mode: RecursiveMode) -> Result<()> {
-        let result = self.append_path(path, recursive_mode);
+    fn watch_inner(&mut self, path: &Path, recursive_mode: RecursiveMode) {
+        self.append_path(path, recursive_mode).unwrap();
         // ignore return error: may be empty path list
-        let _ = self.run();
-        result
+        self.run();
     }
 
     // https://github.com/thibaudgg/rb-fsevent/blob/master/ext/fsevent_watch/main.c
@@ -291,10 +289,9 @@ impl FsEventWatcher {
         Ok(())
     }
 
-    fn run(&mut self) -> Result<()> {
+    fn run(&mut self) {
         if unsafe { cf::CFArrayGetCount(self.paths) } == 0 {
-            // TODO: Reconstruct and add paths to error
-            return Err(Error::path_not_found());
+            panic!("no paths to watch");
         }
 
         // We need to associate the stream context with our callback in order to propagate events
@@ -397,12 +394,7 @@ unsafe fn callback_impl(
 }
 
 impl Watcher for FsEventWatcher {
-    /// Create a new watcher.
-    fn new<F: EventHandler>(event_handler: F) -> Result<Self> {
-        Self::from_event_handler()
-    }
-
-    fn watch(&mut self, path: &Path, recursive_mode: RecursiveMode) -> Result<()> {
+    fn watch(&mut self, path: &Path, recursive_mode: RecursiveMode) {
         self.watch_inner(path, recursive_mode)
     }
 

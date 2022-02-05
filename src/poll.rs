@@ -196,7 +196,7 @@ impl PollWatcher {
         });
     }
 
-    fn watch_inner(&mut self, path: &Path, recursive_mode: RecursiveMode) -> Result<()> {
+    fn watch_inner(&mut self, path: &Path, recursive_mode: RecursiveMode) {
         if let Ok(mut watches) = self.watches.lock() {
             let current_time = Instant::now();
 
@@ -262,19 +262,11 @@ impl PollWatcher {
                 }
             }
         }
-        Ok(())
     }
 }
 
 impl Watcher for PollWatcher {
-    /// Create a new [PollWatcher].
-    fn new<F: EventHandler>(event_handler: F) -> Result<Self> {
-        let event_handler = Arc::new(Mutex::new(event_handler));
-        let delay = Duration::from_secs(30);
-        Self::with_delay(event_handler, delay)
-    }
-
-    fn watch(&mut self, path: &Path, recursive_mode: RecursiveMode) -> Result<()> {
+    fn watch(&mut self, path: &Path, recursive_mode: RecursiveMode) {
         self.watch_inner(path, recursive_mode)
     }
 }

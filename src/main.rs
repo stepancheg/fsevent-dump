@@ -1,32 +1,13 @@
 use std::path::Path;
-use std::thread;
-use std::time::Duration;
-use listen_notify::{Watcher, RecursiveMode, Result, Event};
-use listen_notify::event::Flag;
+use listen_notify::{Watcher, RecursiveMode};
 
-fn main() -> listen_notify::Result<()> {
+fn main() {
     // Automatically select the best implementation for your platform.
-    let mut watcher = listen_notify::FsEventWatcher::new(|res: Result<Event>| {
-        match res {
-           Ok(event) => {
-               if format!("{:?}", event).contains(".hg") {
-                   return;
-               }
-               if event.attrs.flag() == Some(Flag::Rescan) {
-                   // panic!("obtain stack trace: {:?}", event);
-                   println!("rescan {:?}", event);
-               }
-               // println!("event: {:?}", event)
-           },
-           Err(e) => println!("watch error: {:?}", e),
-        }
-    })?;
+    let mut watcher = listen_notify::FsEventWatcher::new();
 
     // Add a path to be watched. All files and directories at that path and
     // below will be monitored for changes.
-    watcher.watch(Path::new("/Users/nga/fbsource"), RecursiveMode::Recursive)?;
+    watcher.watch(Path::new("/Users/nga/fbsource"), RecursiveMode::Recursive);
 
-    loop {
-        thread::sleep(Duration::from_secs(1));
-    }
+    unreachable!();
 }
