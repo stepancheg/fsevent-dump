@@ -172,6 +172,6 @@ unsafe fn callback_impl(
             panic!("Unable to decode StreamFlags: {}", flag);
         });
 
-        println!("raw event: {:?} {:?}", path, flag);
+        println!("{:?} {:?}", path, flag);
     }
 }
