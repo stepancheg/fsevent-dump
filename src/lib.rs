@@ -72,7 +72,6 @@ impl FsEventWatcher {
         self.run();
     }
 
-    // https://github.com/thibaudgg/rb-fsevent/blob/master/ext/fsevent_watch/main.c
     fn append_path(&mut self, path: &Path) {
         assert!(path.exists());
         let str_path = path.to_str().unwrap();
